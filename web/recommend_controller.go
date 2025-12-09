@@ -58,11 +58,14 @@ type ItemData struct {
 }
 
 func (r *RecommendResponse) ToString() string {
-	j, _ := json.Marshal(r)
-	return string(j)
+	return string(r.ToBytes())
 }
 func (r *RecommendResponse) ToBytes() []byte {
-	j, _ := json.Marshal(r)
+	j, err := json.Marshal(r)
+	if err != nil {
+		log.Error(fmt.Sprintf("requestId=%s\tmsg=marshal recommend response failed\terr=%v", r.RequestId, err))
+		return []byte(`{"code":500,"msg":"encode response failed"}`)
+	}
 	return j
 }
 
@@ -77,7 +80,7 @@ func (c *RecommendController) Process(w http.ResponseWriter, r *http.Request) {
 	var err error
 	c.RequestBody, err = c.ReadRequestBody(r)
 	if err != nil {
-		c.SendError(w, ERROR_PARAMETER_CODE, "read parammeter error")
+		c.SendError(w, ERROR_PARAMETER_CODE, "read parameter error")
 		return
 	}
 	if len(c.RequestBody) == 0 {
