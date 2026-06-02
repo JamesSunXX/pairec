@@ -21,7 +21,27 @@ import (
 	"github.com/alibaba/pairec/v2/service/feature"
 	"github.com/alibaba/pairec/v2/service/rank"
 	"github.com/alibaba/pairec/v2/utils"
+	"golang.org/x/time/rate"
 )
+
+var callbackLimiters sync.Map
+
+func getCallbackLimiter(scene string, qps float64) *rate.Limiter {
+	burst := int(qps)
+	if burst < 1 {
+		burst = 1
+	}
+	if v, ok := callbackLimiters.Load(scene); ok {
+		limiter := v.(*rate.Limiter)
+		// Support hot reload: update limit if config changed
+		limiter.SetLimit(rate.Limit(qps))
+		limiter.SetBurst(burst)
+		return limiter
+	}
+	limiter := rate.NewLimiter(rate.Limit(qps), burst)
+	actual, _ := callbackLimiters.LoadOrStore(scene, limiter)
+	return actual.(*rate.Limiter)
+}
 
 type CallBackService struct {
 	recallService      *RecallService
@@ -186,10 +206,25 @@ func (r *CallBackService) Rank(context *context.RecommendContext) {
 
 	if algoGenerator.HasFeatures() {
 		if context.Debug {
-			algoData = algoGenerator.GeneratorAlgoDataDebugWithLevel(2)
+			algoData = algoGenerator.GeneratorAlgoDataDebugWithLevel(2, nil)
 		} else {
-			algoData = algoGenerator.GeneratorAlgoDataDebugWithLevel(debugLevel)
+			algoData = algoGenerator.GeneratorAlgoDataDebugWithLevel(debugLevel, nil)
 		}
+	}
+
+	// Explicit guard: when no item carried features (e.g. r.Items is empty
+	// or every item returned an empty feature map), algoGenerator.HasFeatures
+	// is false and algoData stays nil. The goroutine loop below dereferences
+	// algoData, so without this guard we hit a nil pointer panic at
+	// algoData.GetFeatures(). Returning here also avoids spawning goroutines
+	// that have no work to do.
+	//
+	// With the upstream guards in callback_hook.go and web.SendDirect, this
+	// branch is only reachable when a future caller bypasses both, i.e.
+	// misuse, so log at Warning level for ops triage.
+	if algoData == nil {
+		log.Warning(fmt.Sprintf("requestId=%s\tmodule=callback\tevent=Rank\tmsg=algoData is nil, skipping rank fan-out", context.RecommendId))
+		return
 	}
 
 	var wg sync.WaitGroup
@@ -224,6 +259,16 @@ func (r *CallBackService) Rank(context *context.RecommendContext) {
 					}
 				}
 			}
+			if callBackConfig.RateLimitQPS > 0 {
+				limiter := getCallbackLimiter(scene_name, callBackConfig.RateLimitQPS)
+				if !limiter.Allow() {
+					log.Warning(fmt.Sprintf("requestId=%s\tcallback rate limited, skipping EAS call", context.RecommendId))
+					return
+				}
+			}
+			if callBackConfig.JitterMaxMs > 0 {
+				time.Sleep(time.Duration(rand.Intn(callBackConfig.JitterMaxMs)) * time.Millisecond)
+			}
 			// run 返回原始的值，然后处理返回数据// 注册配置
 			ret, err := algorithm.Run(newAlgoName, algoData.GetFeatures())
 			if err != nil {
@@ -235,14 +280,26 @@ func (r *CallBackService) Rank(context *context.RecommendContext) {
 					if processor == eas.Eas_Processor_EASYREC {
 						itemList := algoData.GetItems()
 						for j := 0; j < len(result) && j < len(itemList); j++ {
-							response, _ := (result[j]).(*eas.EasyrecResponse)
-							if writeRawFeatrues {
-								itemList[j].AddProperty("raw_features", response.RawFeatures)
-							}
+							switch response := result[j].(type) {
+							case *eas.EasyrecResponse:
+								if writeRawFeatrues {
+									itemList[j].AddProperty("raw_features", response.RawFeatures)
+								}
 
-							itemList[j].AddProperty("generate_features", response.GenerateFeatures)
-							//itemList[j].Properties["generate_features"] = response.GenerateFeatures
-							itemList[j].AddProperty("context_features", response.ContextFeatures)
+								itemList[j].AddProperty("generate_features", response.GenerateFeatures)
+								//itemList[j].Properties["generate_features"] = response.GenerateFeatures
+								itemList[j].AddProperty("context_features", response.ContextFeatures)
+							case *eas.EasyrecClassificationResponse:
+								if writeRawFeatrues {
+									itemList[j].AddProperty("raw_features", response.RawFeatures)
+								}
+
+								itemList[j].AddProperty("generate_features", response.GenerateFeatures)
+								//itemList[j].Properties["generate_features"] = response.GenerateFeatures
+								itemList[j].AddProperty("context_features", response.ContextFeatures)
+							default:
+								log.Error(fmt.Sprintf("requestId=%s\tmodule=callback\terror=algo response type(%T) not supported", context.RecommendId, response))
+							}
 						}
 					}
 				}

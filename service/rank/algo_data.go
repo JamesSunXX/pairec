@@ -25,7 +25,7 @@ type IAlgoDataGenerator interface {
 	GeneratorAlgoData() IAlgoData
 	// GeneratorAlgoDataDebug generator algo data with debug mode
 	GeneratorAlgoDataDebug() IAlgoData
-	GeneratorAlgoDataDebugWithLevel(level int) IAlgoData
+	GeneratorAlgoDataDebugWithLevel(level int, meta map[string]string) IAlgoData
 	HasFeatures() bool
 	SetItemFeatures([]string)
 }
@@ -86,8 +86,9 @@ func (d *EasyrecAlgoData) GetFeatures() interface{} {
 }
 
 type AlgoDataGenerator struct {
-	requestData []map[string]interface{}
-	requestItem []*module.Item
+	requestData  []map[string]interface{}
+	requestItem  []*module.Item
+	userFeatures map[string]interface{}
 }
 
 // SetItemFeatures implements IAlgoDataGenerator.
@@ -105,22 +106,31 @@ func (g *AlgoDataGenerator) AddFeatures(item *module.Item, itemFeatures map[stri
 	if item != nil {
 		g.requestItem = append(g.requestItem, item)
 	}
-
-	features := make(map[string]interface{}, len(itemFeatures)+len(userFeatures))
-	for k, v := range userFeatures {
-		features[k] = v
+	if g.userFeatures == nil {
+		g.userFeatures = userFeatures
 	}
+
+	features := make(map[string]interface{}, len(itemFeatures))
 	for k, v := range itemFeatures {
 		features[k] = v
 	}
-
 	g.requestData = append(g.requestData, features)
 }
 func (g *AlgoDataGenerator) GeneratorAlgoData() IAlgoData {
 	copydata := make([]map[string]interface{}, len(g.requestData))
+	for i, itemFeatures := range g.requestData {
+		merged := make(map[string]interface{}, len(itemFeatures)+len(g.userFeatures))
+		for k, v := range g.userFeatures {
+			merged[k] = v
+		}
+		for k, v := range itemFeatures {
+			merged[k] = v
+		}
+		copydata[i] = merged
+	}
+
 	copyItems := make([]*module.Item, len(g.requestItem))
 	copy(copyItems, g.requestItem)
-	copy(copydata, g.requestData)
 
 	algoData := &AlgoData{
 		AlgoDataBase: &AlgoDataBase{
@@ -138,7 +148,7 @@ func (g *AlgoDataGenerator) GeneratorAlgoDataDebug() IAlgoData {
 	return g.GeneratorAlgoData()
 }
 
-func (g *AlgoDataGenerator) GeneratorAlgoDataDebugWithLevel(level int) IAlgoData {
+func (g *AlgoDataGenerator) GeneratorAlgoDataDebugWithLevel(level int, meta map[string]string) IAlgoData {
 	return g.GeneratorAlgoData()
 }
 
@@ -183,8 +193,8 @@ type EasyrecAlgoDataGenerator struct {
 
 func NewEasyrecAlgoDataGenerator(contextFeatures []string) *EasyrecAlgoDataGenerator {
 	generator := &EasyrecAlgoDataGenerator{
-		requestItem:     make([]*module.Item, 0, 100),
-		contextFeatures: make(map[string][]interface{}, 8),
+		requestItem:     make([]*module.Item, 0, 128),
+		contextFeatures: make(map[string][]interface{}, len(contextFeatures)+8),
 		parseFeature:    true,
 	}
 
@@ -195,6 +205,7 @@ func NewEasyrecAlgoDataGenerator(contextFeatures []string) *EasyrecAlgoDataGener
 				valueType: reflect.TypeOf(""),
 			}
 			generator.itemFeatures = append(generator.itemFeatures, feature)
+			generator.contextFeatures[featureName] = make([]interface{}, 0, 128)
 		}
 	}
 
@@ -274,14 +285,15 @@ func (g *EasyrecAlgoDataGenerator) AddFeatures(item *module.Item, itemFeatures m
 }
 
 func (g *EasyrecAlgoDataGenerator) GeneratorAlgoData() IAlgoData {
-	copyItems := make([]*module.Item, len(g.requestItem))
-	copy(copyItems, g.requestItem)
+	// Transfer ownership instead of copy — generator resets immediately after
+	items := g.requestItem
+	g.requestItem = make([]*module.Item, 0, 128)
 
 	builder := easyrec.NewEasyrecRequestBuilder()
 	for k, v := range g.userFeatures {
 		builder.AddUserFeature(k, v)
 	}
-	for _, item := range g.requestItem {
+	for _, item := range items {
 		builder.AddItemId(string(item.Id))
 	}
 	for k, v := range g.contextFeatures {
@@ -295,29 +307,33 @@ func (g *EasyrecAlgoDataGenerator) GeneratorAlgoData() IAlgoData {
 
 	algoData := &EasyrecAlgoData{
 		AlgoDataBase: &AlgoDataBase{
-			Items:      copyItems,
+			Items:      items,
 			AlgoResult: make(map[string][]response.AlgoResponse),
 		},
 		easyrecRequest: builder.EasyrecRequest(),
 	}
 
-	g.requestItem = g.requestItem[:0]
 	return algoData
 }
 
 func (g *EasyrecAlgoDataGenerator) GeneratorAlgoDataDebug() IAlgoData {
-	return g.GeneratorAlgoDataDebugWithLevel(1)
+	return g.GeneratorAlgoDataDebugWithLevel(1, nil)
 }
 
-func (g *EasyrecAlgoDataGenerator) GeneratorAlgoDataDebugWithLevel(level int) IAlgoData {
-	copyItems := make([]*module.Item, len(g.requestItem))
-	copy(copyItems, g.requestItem)
+func (g *EasyrecAlgoDataGenerator) GeneratorAlgoDataDebugWithLevel(level int, meta map[string]string) IAlgoData {
+	// Transfer ownership instead of copy — generator resets immediately after
+	items := g.requestItem
+	g.requestItem = make([]*module.Item, 0, 128)
 
 	builder := easyrec.NewEasyrecRequestBuilderDebugWithLevel(level)
+	if meta != nil && len(meta) > 0 {
+		builder.SetMetaData(meta)
+	}
+
 	for k, v := range g.userFeatures {
 		builder.AddUserFeature(k, v)
 	}
-	for _, item := range g.requestItem {
+	for _, item := range items {
 		builder.AddItemId(string(item.Id))
 	}
 	for k, v := range g.contextFeatures {
@@ -331,13 +347,12 @@ func (g *EasyrecAlgoDataGenerator) GeneratorAlgoDataDebugWithLevel(level int) IA
 
 	algoData := &EasyrecAlgoData{
 		AlgoDataBase: &AlgoDataBase{
-			Items:      copyItems,
+			Items:      items,
 			AlgoResult: make(map[string][]response.AlgoResponse),
 		},
 		easyrecRequest: builder.EasyrecRequest(),
 	}
 
-	g.requestItem = g.requestItem[:0]
 	return algoData
 }
 

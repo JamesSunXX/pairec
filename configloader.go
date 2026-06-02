@@ -19,6 +19,7 @@ import (
 	"github.com/alibaba/pairec/v2/datasource/hbase_thrift"
 	"github.com/alibaba/pairec/v2/datasource/kafka"
 	"github.com/alibaba/pairec/v2/datasource/opensearch"
+	"github.com/alibaba/pairec/v2/datasource/recallengine"
 	"github.com/alibaba/pairec/v2/datasource/sls"
 	"github.com/alibaba/pairec/v2/filter"
 	"github.com/alibaba/pairec/v2/log"
@@ -38,6 +39,7 @@ import (
 	"github.com/alibaba/pairec/v2/service/recall/berecall"
 	"github.com/alibaba/pairec/v2/sort"
 	"github.com/alibaba/pairec/v2/utils"
+	"github.com/alibaba/pairec/v2/web"
 )
 
 var (
@@ -94,6 +96,7 @@ func (l *ConfigLoader) reloadConfig(config *recconf.RecommendConfig) {
 	kafka.Load(config)
 	datahub.Load(config)
 	beengine.Load(config)
+	recallengine.Load(recconf.Config)
 	graph.Load(config)
 	ha3engine.Load(recconf.Config)
 	opensearch.Load(recconf.Config)
@@ -116,6 +119,7 @@ func (l *ConfigLoader) reloadConfig(config *recconf.RecommendConfig) {
 	general_rank.LoadGeneralRankWithConfig(config)
 	pipeline.LoadPipelineConfigs(config)
 	fallback.LoadFallbackConfig(config)
+	initCallbackHandler(config)
 }
 
 func (l *ConfigLoader) loadConfigFromConfigServer() (*recconf.RecommendConfig, error) {
@@ -172,4 +176,20 @@ func ListenConfig(configName string) {
 	loader.configVersionValue = version
 
 	go loader.loopLoadConfig()
+}
+
+// initCallbackHandler initializes the callback worker pool from config.
+// Aggregates across all scenes: uses max WorkerPoolSize, OR of DropOnBackpressure.
+func initCallbackHandler(config *recconf.RecommendConfig) {
+	var poolSize int
+	var drop bool
+	for _, cbConf := range config.CallBackConfs {
+		if cbConf.WorkerPoolSize > poolSize {
+			poolSize = cbConf.WorkerPoolSize
+		}
+		if cbConf.DropOnBackpressure {
+			drop = true
+		}
+	}
+	web.InitHandler(poolSize, 5000, drop)
 }
