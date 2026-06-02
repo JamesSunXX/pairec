@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -59,8 +58,15 @@ type ItemData struct {
 }
 
 func (r *RecommendResponse) ToString() string {
-	j, _ := json.Marshal(r)
-	return string(j)
+	return string(r.ToBytes())
+}
+func (r *RecommendResponse) ToBytes() []byte {
+	j, err := json.Marshal(r)
+	if err != nil {
+		log.Error(fmt.Sprintf("requestId=%s\tmsg=marshal recommend response failed\terr=%v", r.RequestId, err))
+		return []byte(`{"code":500,"msg":"encode response failed"}`)
+	}
+	return j
 }
 
 type RecommendController struct {
@@ -72,9 +78,9 @@ type RecommendController struct {
 func (c *RecommendController) Process(w http.ResponseWriter, r *http.Request) {
 	c.Start = time.Now()
 	var err error
-	c.RequestBody, err = io.ReadAll(r.Body)
+	c.RequestBody, err = c.ReadRequestBody(r)
 	if err != nil {
-		c.SendError(w, ERROR_PARAMETER_CODE, "read parammeter error")
+		c.SendError(w, ERROR_PARAMETER_CODE, "read parameter error")
 		return
 	}
 	if len(c.RequestBody) == 0 {
@@ -140,7 +146,7 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 				Message:   "items size not enough",
 			},
 		}
-		io.WriteString(w, response.ToString())
+		c.Response(w, r, response.ToBytes())
 		return
 	}
 
@@ -153,7 +159,7 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 			Message:   "success",
 		},
 	}
-	io.WriteString(w, response.ToString())
+	c.Response(w, r, response.ToBytes())
 }
 func (c *RecommendController) makeRecommendContext() {
 	c.context = context.NewRecommendContext()
